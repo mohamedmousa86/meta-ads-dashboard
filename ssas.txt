@@ -1,0 +1,1094 @@
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import requests
+import json
+from datetime import datetime, timedelta
+import time
+
+# Page Configuration
+st.set_page_config(
+    page_title="Meta Ads Advanced Analytics Dashboard",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS
+st.markdown("""
+    <style>
+    .main {
+        background-color: #f5f7fa;
+    }
+    .stMetric {
+        background-color: white;
+        padding: 15px;
+        border-radius: 10px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    .winner-card {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        padding: 20px;
+        border-radius: 10px;
+        color: white;
+        margin: 10px 0;
+    }
+    .loser-card {
+        background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+        padding: 20px;
+        border-radius: 10px;
+        color: white;
+        margin: 10px 0;
+    }
+    h1 {
+        color: #1e3a8a;
+        font-weight: 700;
+    }
+    h2 {
+        color: #3b82f6;
+        font-weight: 600;
+    }
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 24px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        height: 50px;
+        background-color: white;
+        border-radius: 5px;
+        padding: 10px 20px;
+        font-weight: 600;
+    }
+    .metric-container {
+        background: white;
+        padding: 20px;
+        border-radius: 10px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        margin: 10px 0;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+# Configuration
+ACCESS_TOKEN = "EAAX6zQ4lZCf0BRMM0juiubJZBkbPqryoZCXYPMdwa0v9oMrOPut45gH6LyBDZA34er5H17Ekp4ZBH6Inzq4hUFwiUKCITBglXhrxjNpTNJ6olytrSYcUJ8JR2wX4Bx9yln0jQ1YgYOe3ZAfakNiT5SZALgtWgbZCQdM9HjRmtfeNB5FtfyWeD9aEjiQSvXVjHoVmdReaKD48EVmMZAUr9zRnZBPxQyk81HibtYUZA7BZAu0lOC9YQ2tJWwSZBdYuYl6TZC3k6e68GyATtyZCJC2ZBTNFYegZD"
+AD_ACCOUNT_ID = "act_185102058627078"
+BASE_URL = "https://graph.facebook.com/v18.0"
+
+# Helper Functions
+@st.cache_data(ttl=300)
+def extract_action_value(actions, action_type):
+    """Extract specific action values"""
+    if not actions:
+        return 0
+    for action in actions:
+        if action.get('action_type') == action_type:
+            return float(action.get('value', 0))
+    return 0
+
+@st.cache_data(ttl=300)
+def fetch_data(endpoint, params):
+    """Generic data fetching function with caching"""
+    url = f"{BASE_URL}/{endpoint}"
+    params['access_token'] = ACCESS_TOKEN
+    
+    try:
+        response = requests.get(url, params=params)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        st.error(f"Error fetching data: {str(e)}")
+        return {"data": []}
+
+def get_campaigns_performance(start_date, end_date):
+    """Fetch campaign-level performance"""
+    params = {
+        'level': 'campaign',
+        'time_range': json.dumps({
+            'since': start_date,
+            'until': end_date
+        }),
+        'fields': 'campaign_id,campaign_name,spend,impressions,clicks,ctr,cpm,cpc,actions,action_values,purchase_roas',
+        'limit': 100
+    }
+    return fetch_data(f"{AD_ACCOUNT_ID}/insights", params)
+
+def get_campaign_status():
+    """Fetch campaign statuses"""
+    params = {
+        'fields': 'id,name,status,effective_status,configured_status',
+        'limit': 100
+    }
+    return fetch_data(f"{AD_ACCOUNT_ID}/campaigns", params)
+
+def get_creative_performance(start_date, end_date):
+    """Fetch ad creative performance"""
+    params = {
+        'level': 'ad',
+        'time_range': json.dumps({
+            'since': start_date,
+            'until': end_date
+        }),
+        'fields': 'ad_id,ad_name,adset_name,campaign_name,spend,impressions,clicks,ctr,cpm,cpc,actions,action_values,purchase_roas',
+        'limit': 500
+    }
+    return fetch_data(f"{AD_ACCOUNT_ID}/insights", params)
+
+def get_breakdown_data(start_date, end_date, breakdown_type):
+    """Fetch breakdown data (demographics, placement, geo)"""
+    params = {
+        'level': 'ad',
+        'breakdowns': breakdown_type,
+        'time_range': json.dumps({
+            'since': start_date,
+            'until': end_date
+        }),
+        'fields': 'campaign_name,spend,impressions,clicks,ctr,cpm,actions,action_values',
+        'limit': 1000
+    }
+    return fetch_data(f"{AD_ACCOUNT_ID}/insights", params)
+
+def process_campaign_data(campaigns_data, status_data):
+    """Process campaign data with ROAS flagging"""
+    campaigns = []
+    status_dict = {item['id']: item for item in status_data.get('data', [])}
+    
+    for campaign in campaigns_data.get('data', []):
+        campaign_id = campaign.get('campaign_id')
+        spend = float(campaign.get('spend', 0))
+        
+        purchases = extract_action_value(campaign.get('actions'), 'purchase')
+        revenue = extract_action_value(campaign.get('action_values'), 'purchase')
+        
+        roas = revenue / spend if spend > 0 else 0
+        
+        status_info = status_dict.get(campaign_id, {})
+        status = status_info.get('effective_status', 'UNKNOWN')
+        
+        campaigns.append({
+            'Campaign Name': campaign.get('campaign_name'),
+            'Status': status,
+            'Spend': spend,
+            'Revenue': revenue,
+            'ROAS': roas,
+            'Purchases': int(purchases),
+            'CPM': float(campaign.get('cpm', 0)),
+            'CTR': float(campaign.get('ctr', 0)),
+            'CPC': float(campaign.get('cpc', 0)),
+            'Impressions': int(campaign.get('impressions', 0)),
+            'Clicks': int(campaign.get('clicks', 0)),
+            'ROAS_Flag': '🟢 WINNER' if roas >= 5 else '🔴 LOSER'
+        })
+    
+    return pd.DataFrame(campaigns)
+
+def process_creative_data(creative_data):
+    """Process creative performance"""
+    creatives = []
+    
+    for ad in creative_data.get('data', []):
+        spend = float(ad.get('spend', 0))
+        purchases = extract_action_value(ad.get('actions'), 'purchase')
+        revenue = extract_action_value(ad.get('action_values'), 'purchase')
+        
+        roas = revenue / spend if spend > 0 else 0
+        
+        creatives.append({
+            'Ad Name': ad.get('ad_name'),
+            'Campaign': ad.get('campaign_name'),
+            'Adset': ad.get('adset_name'),
+            'Impressions': int(ad.get('impressions', 0)),
+            'Clicks': int(ad.get('clicks', 0)),
+            'CTR': float(ad.get('ctr', 0)),
+            'Spend': spend,
+            'Purchases': int(purchases),
+            'Revenue': revenue,
+            'ROAS': roas,
+            'CPM': float(ad.get('cpm', 0)),
+            'CPC': float(ad.get('cpc', 0))
+        })
+    
+    df = pd.DataFrame(creatives)
+    
+    if not df.empty:
+        median_roas = df['ROAS'].median()
+        median_ctr = df['CTR'].median()
+        
+        def classify_creative(row):
+            if row['ROAS'] >= 5 and row['CTR'] >= median_ctr:
+                return '🏆 TOP WINNER'
+            elif row['ROAS'] >= 5:
+                return '🟢 WINNER'
+            elif row['ROAS'] < 2:
+                return '🔴 LOSER'
+            else:
+                return '🟡 AVERAGE'
+        
+        df['Performance'] = df.apply(classify_creative, axis=1)
+    
+    return df
+
+def process_demographic_data(demographic_data):
+    """Process demographic breakdown"""
+    demographics = {}
+    
+    for item in demographic_data.get('data', []):
+        age = item.get('age', 'Unknown')
+        gender = item.get('gender', 'Unknown')
+        demo_key = f"{age} - {gender}"
+        
+        spend = float(item.get('spend', 0))
+        purchases = extract_action_value(item.get('actions'), 'purchase')
+        revenue = extract_action_value(item.get('action_values'), 'purchase')
+        
+        if demo_key not in demographics:
+            demographics[demo_key] = {
+                'Spend': 0, 'Impressions': 0, 'Clicks': 0,
+                'Purchases': 0, 'Revenue': 0
+            }
+        
+        demographics[demo_key]['Spend'] += spend
+        demographics[demo_key]['Impressions'] += int(item.get('impressions', 0))
+        demographics[demo_key]['Clicks'] += int(item.get('clicks', 0))
+        demographics[demo_key]['Purchases'] += purchases
+        demographics[demo_key]['Revenue'] += revenue
+    
+    demo_list = []
+    for demo, data in demographics.items():
+        roas = data['Revenue'] / data['Spend'] if data['Spend'] > 0 else 0
+        ctr = (data['Clicks'] / data['Impressions'] * 100) if data['Impressions'] > 0 else 0
+        
+        demo_list.append({
+            'Demographic': demo,
+            'Spend': data['Spend'],
+            'Impressions': data['Impressions'],
+            'Clicks': data['Clicks'],
+            'CTR': ctr,
+            'Purchases': int(data['Purchases']),
+            'Revenue': data['Revenue'],
+            'ROAS': roas,
+            'Flag': '🟢' if roas >= 5 else '🔴'
+        })
+    
+    return pd.DataFrame(demo_list)
+
+def process_placement_data(placement_data):
+    """Process placement breakdown"""
+    placements = {}
+    
+    for item in placement_data.get('data', []):
+        platform = item.get('publisher_platform', 'Unknown')
+        position = item.get('platform_position', 'Unknown')
+        placement_key = f"{platform} - {position}"
+        
+        spend = float(item.get('spend', 0))
+        purchases = extract_action_value(item.get('actions'), 'purchase')
+        revenue = extract_action_value(item.get('action_values'), 'purchase')
+        
+        if placement_key not in placements:
+            placements[placement_key] = {
+                'Spend': 0, 'Impressions': 0, 'Clicks': 0,
+                'Purchases': 0, 'Revenue': 0
+            }
+        
+        placements[placement_key]['Spend'] += spend
+        placements[placement_key]['Impressions'] += int(item.get('impressions', 0))
+        placements[placement_key]['Clicks'] += int(item.get('clicks', 0))
+        placements[placement_key]['Purchases'] += purchases
+        placements[placement_key]['Revenue'] += revenue
+    
+    placement_list = []
+    for placement, data in placements.items():
+        roas = data['Revenue'] / data['Spend'] if data['Spend'] > 0 else 0
+        ctr = (data['Clicks'] / data['Impressions'] * 100) if data['Impressions'] > 0 else 0
+        cpm = (data['Spend'] / data['Impressions'] * 1000) if data['Impressions'] > 0 else 0
+        
+        placement_list.append({
+            'Placement': placement,
+            'Spend': data['Spend'],
+            'Impressions': data['Impressions'],
+            'Clicks': data['Clicks'],
+            'CTR': ctr,
+            'CPM': cpm,
+            'Purchases': int(data['Purchases']),
+            'Revenue': data['Revenue'],
+            'ROAS': roas,
+            'Flag': '🟢' if roas >= 5 else '🔴'
+        })
+    
+    return pd.DataFrame(placement_list)
+
+def process_geographic_data(geographic_data):
+    """Process geographic breakdown"""
+    locations = {}
+    
+    for item in geographic_data.get('data', []):
+        country = item.get('country', 'Unknown')
+        region = item.get('region', 'Unknown')
+        location_key = f"{country} - {region}"
+        
+        spend = float(item.get('spend', 0))
+        purchases = extract_action_value(item.get('actions'), 'purchase')
+        revenue = extract_action_value(item.get('action_values'), 'purchase')
+        
+        if location_key not in locations:
+            locations[location_key] = {
+                'Spend': 0, 'Impressions': 0,
+                'Purchases': 0, 'Revenue': 0
+            }
+        
+        locations[location_key]['Spend'] += spend
+        locations[location_key]['Impressions'] += int(item.get('impressions', 0))
+        locations[location_key]['Purchases'] += purchases
+        locations[location_key]['Revenue'] += revenue
+    
+    location_list = []
+    for location, data in locations.items():
+        roas = data['Revenue'] / data['Spend'] if data['Spend'] > 0 else 0
+        
+        location_list.append({
+            'Location': location,
+            'Spend': data['Spend'],
+            'Impressions': data['Impressions'],
+            'Purchases': int(data['Purchases']),
+            'Revenue': data['Revenue'],
+            'ROAS': roas,
+            'Flag': '🟢' if roas >= 5 else '🔴'
+        })
+    
+    return pd.DataFrame(location_list)
+
+# Main Dashboard
+def main():
+    # Header
+    st.title("📊 Meta Ads Advanced Analytics Dashboard")
+    st.markdown("### Real-time Performance Tracking with ROAS Analysis (EGP)")
+    
+    # Sidebar
+    with st.sidebar:
+        st.image("https://upload.wikimedia.org/wikipedia/commons/7/7b/Meta_Platforms_Inc._logo.svg", width=200)
+        st.markdown("---")
+        
+        st.subheader("📅 Date Range Selection")
+        
+        # Preset date ranges
+        date_preset = st.selectbox(
+            "Quick Select",
+            ["Custom", "Today", "Yesterday", "Last 7 Days", "Last 30 Days", "This Month", "Last Month", "Year to Date"]
+        )
+        
+        today = datetime.now().date()
+        
+        if date_preset == "Today":
+            start_date = end_date = today
+        elif date_preset == "Yesterday":
+            start_date = end_date = today - timedelta(days=1)
+        elif date_preset == "Last 7 Days":
+            start_date = today - timedelta(days=7)
+            end_date = today
+        elif date_preset == "Last 30 Days":
+            start_date = today - timedelta(days=30)
+            end_date = today
+        elif date_preset == "This Month":
+            start_date = today.replace(day=1)
+            end_date = today
+        elif date_preset == "Last Month":
+            last_month = today.replace(day=1) - timedelta(days=1)
+            start_date = last_month.replace(day=1)
+            end_date = last_month
+        elif date_preset == "Year to Date":
+            start_date = today.replace(month=1, day=1)
+            end_date = today
+        else:  # Custom
+            col1, col2 = st.columns(2)
+            with col1:
+                start_date = st.date_input("Start Date", today.replace(month=1, day=1))
+            with col2:
+                end_date = st.date_input("End Date", today)
+        
+        st.markdown("---")
+        
+        # ROAS Threshold
+        st.subheader("⚙️ Settings")
+        roas_threshold = st.slider("ROAS Threshold", 1.0, 10.0, 5.0, 0.5)
+        
+        st.markdown("---")
+        
+        # Refresh button
+        if st.button("🔄 Refresh Data", use_container_width=True):
+            st.cache_data.clear()
+            st.experimental_rerun()
+        
+        st.markdown("---")
+        st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    # Convert dates to strings
+    start_date_str = start_date.strftime("%Y-%m-%d")
+    end_date_str = end_date.strftime("%Y-%m-%d")
+    
+    # Fetch Data
+    with st.spinner("Loading data..."):
+        campaigns_data = get_campaigns_performance(start_date_str, end_date_str)
+        status_data = get_campaign_status()
+        creative_data = get_creative_performance(start_date_str, end_date_str)
+        demographic_data = get_breakdown_data(start_date_str, end_date_str, 'age,gender')
+        placement_data = get_breakdown_data(start_date_str, end_date_str, 'publisher_platform,platform_position')
+        geographic_data = get_breakdown_data(start_date_str, end_date_str, 'country,region')
+        
+        # Process Data
+        campaign_df = process_campaign_data(campaigns_data, status_data)
+        creative_df = process_creative_data(creative_data)
+        demographic_df = process_demographic_data(demographic_data)
+        placement_df = process_placement_data(placement_data)
+        geographic_df = process_geographic_data(geographic_data)
+    
+    # Key Metrics Overview
+    st.markdown("## 📈 Key Performance Indicators")
+    
+    if not campaign_df.empty:
+        col1, col2, col3, col4, col5 = st.columns(5)
+        
+        total_spend = campaign_df['Spend'].sum()
+        total_revenue = campaign_df['Revenue'].sum()
+        overall_roas = total_revenue / total_spend if total_spend > 0 else 0
+        total_purchases = campaign_df['Purchases'].sum()
+        avg_cpm = campaign_df['CPM'].mean()
+        
+        with col1:
+            st.metric(
+                "Total Spend",
+                f"EGP {total_spend:,.2f}",
+                delta=None
+            )
+        
+        with col2:
+            st.metric(
+                "Total Revenue",
+                f"EGP {total_revenue:,.2f}",
+                delta=f"{((total_revenue/total_spend - 1) * 100):.1f}%" if total_spend > 0 else "0%"
+            )
+        
+        with col3:
+            roas_delta = "🟢" if overall_roas >= roas_threshold else "🔴"
+            st.metric(
+                "Overall ROAS",
+                f"{overall_roas:.2f}x",
+                delta=roas_delta
+            )
+        
+        with col4:
+            st.metric(
+                "Total Purchases",
+                f"{int(total_purchases):,}",
+                delta=None
+            )
+        
+        with col5:
+            st.metric(
+                "Avg CPM",
+                f"EGP {avg_cpm:.2f}",
+                delta=None
+            )
+    
+    st.markdown("---")
+    
+    # Main Tabs
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        "📊 Campaign Performance",
+        "🎨 Creative Analysis",
+        "📍 Placement Breakdown",
+        "👥 Demographics",
+        "🌍 Geographic",
+        "💡 Insights & Actions"
+    ])
+    
+    # TAB 1: Campaign Performance
+    with tab1:
+        st.markdown("## 📊 Campaign Performance Dashboard")
+        
+        if not campaign_df.empty:
+            # Filter options
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                status_filter = st.multiselect(
+                    "Filter by Status",
+                    options=campaign_df['Status'].unique(),
+                    default=campaign_df['Status'].unique()
+                )
+            
+            with col2:
+                roas_filter = st.selectbox(
+                    "ROAS Filter",
+                    ["All", "Winners (≥5)", "Losers (<5)"]
+                )
+            
+            with col3:
+                sort_by = st.selectbox(
+                    "Sort by",
+                    ["ROAS", "Spend", "Revenue", "Purchases"]
+                )
+            
+            # Apply filters
+            filtered_df = campaign_df[campaign_df['Status'].isin(status_filter)]
+            
+            if roas_filter == "Winners (≥5)":
+                filtered_df = filtered_df[filtered_df['ROAS'] >= roas_threshold]
+            elif roas_filter == "Losers (<5)":
+                filtered_df = filtered_df[filtered_df['ROAS'] < roas_threshold]
+            
+            filtered_df = filtered_df.sort_values(sort_by, ascending=False)
+            
+            # Campaign Table
+            st.markdown("### Campaign Performance Table")
+            
+            # Style the dataframe
+            def color_roas(val):
+                if isinstance(val, (int, float)):
+                    color = '#10b981' if val >= roas_threshold else '#ef4444'
+                    return f'background-color: {color}; color: white; font-weight: bold'
+                return ''
+            
+            styled_df = filtered_df.style.applymap(
+                color_roas,
+                subset=['ROAS']
+            ).format({
+                'Spend': 'EGP {:,.2f}',
+                'Revenue': 'EGP {:,.2f}',
+                'ROAS': '{:.2f}x',
+                'CPM': 'EGP {:.2f}',
+                'CTR': '{:.2f}%',
+                'CPC': 'EGP {:.2f}',
+                'Impressions': '{:,}',
+                'Clicks': '{:,}'
+            })
+            
+            st.dataframe(styled_df, use_container_width=True, height=400)
+            
+            # Charts
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # ROAS by Campaign
+                fig_roas = px.bar(
+                    filtered_df.head(10),
+                    x='Campaign Name',
+                    y='ROAS',
+                    color='ROAS',
+                    color_continuous_scale=['#ef4444', '#fbbf24', '#10b981'],
+                    title='Top 10 Campaigns by ROAS'
+                )
+                fig_roas.add_hline(y=roas_threshold, line_dash="dash", line_color="red", annotation_text="Target ROAS")
+                fig_roas.update_layout(height=400)
+                st.plotly_chart(fig_roas, use_container_width=True)
+            
+            with col2:
+                # Spend vs Revenue
+                fig_spend = go.Figure()
+                fig_spend.add_trace(go.Bar(
+                    name='Spend',
+                    x=filtered_df.head(10)['Campaign Name'],
+                    y=filtered_df.head(10)['Spend'],
+                    marker_color='#3b82f6'
+                ))
+                fig_spend.add_trace(go.Bar(
+                    name='Revenue',
+                    x=filtered_df.head(10)['Campaign Name'],
+                    y=filtered_df.head(10)['Revenue'],
+                    marker_color='#10b981'
+                ))
+                fig_spend.update_layout(
+                    title='Spend vs Revenue (Top 10 Campaigns)',
+                    barmode='group',
+                    height=400
+                )
+                st.plotly_chart(fig_spend, use_container_width=True)
+            
+            # Winner/Loser Summary
+            st.markdown("### 🎯 Quick Summary")
+            
+            winners = filtered_df[filtered_df['ROAS'] >= roas_threshold]
+            losers = filtered_df[filtered_df['ROAS'] < roas_threshold]
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.success(f"**🟢 {len(winners)} Winners** (ROAS ≥ {roas_threshold})")
+                st.metric("Total Spend", f"EGP {winners['Spend'].sum():,.2f}")
+                st.metric("Avg ROAS", f"{winners['ROAS'].mean():.2f}x")
+            
+            with col2:
+                st.error(f"**🔴 {len(losers)} Losers** (ROAS < {roas_threshold})")
+                st.metric("Wasted Budget", f"EGP {losers['Spend'].sum():,.2f}")
+                st.metric("Avg ROAS", f"{losers['ROAS'].mean():.2f}x")
+            
+            with col3:
+                potential_savings = losers['Spend'].sum()
+                st.warning(f"**💰 Potential Optimization**")
+                st.metric("Budget to Reallocate", f"EGP {potential_savings:,.2f}")
+                st.metric("Total Campaigns", f"{len(filtered_df)}")
+    
+    # TAB 2: Creative Analysis
+    with tab2:
+        st.markdown("## 🎨 Creative Performance Analysis")
+        
+        if not creative_df.empty:
+            # Filters
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                performance_filter = st.multiselect(
+                    "Filter by Performance",
+                    options=creative_df['Performance'].unique(),
+                    default=creative_df['Performance'].unique()
+                )
+            
+            with col2:
+                campaign_filter = st.multiselect(
+                    "Filter by Campaign",
+                    options=creative_df['Campaign'].unique(),
+                    default=creative_df['Campaign'].unique()[:5] if len(creative_df['Campaign'].unique()) > 5 else creative_df['Campaign'].unique()
+                )
+            
+            with col3:
+                min_spend = st.number_input("Min Spend (EGP)", min_value=0, value=0)
+            
+            # Apply filters
+            filtered_creatives = creative_df[
+                (creative_df['Performance'].isin(performance_filter)) &
+                (creative_df['Campaign'].isin(campaign_filter)) &
+                (creative_df['Spend'] >= min_spend)
+            ].sort_values('ROAS', ascending=False)
+            
+            # Creative Performance Table
+            st.markdown("### Creative Performance Table")
+            
+            def color_performance(val):
+                if '🏆' in str(val):
+                    return 'background-color: #10b981; color: white; font-weight: bold'
+                elif '🟢' in str(val):
+                    return 'background-color: #34d399; color: white'
+                elif '🔴' in str(val):
+                    return 'background-color: #ef4444; color: white; font-weight: bold'
+                elif '🟡' in str(val):
+                    return 'background-color: #fbbf24; color: white'
+                return ''
+            
+            styled_creative_df = filtered_creatives.style.applymap(
+                color_performance,
+                subset=['Performance']
+            ).format({
+                'Spend': 'EGP {:,.2f}',
+                'Revenue': 'EGP {:,.2f}',
+                'ROAS': '{:.2f}x',
+                'CPM': 'EGP {:.2f}',
+                'CTR': '{:.2f}%',
+                'CPC': 'EGP {:.2f}',
+                'Impressions': '{:,}',
+                'Clicks': '{:,}'
+            })
+            
+            st.dataframe(styled_creative_df, use_container_width=True, height=400)
+            
+            # Charts
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # Top Winners
+                top_winners = filtered_creatives[filtered_creatives['Performance'].str.contains('WINNER')].head(10)
+                
+                fig_winners = px.scatter(
+                    top_winners,
+                    x='CTR',
+                    y='ROAS',
+                    size='Spend',
+                    color='Performance',
+                    hover_data=['Ad Name', 'Purchases'],
+                    title='Top Performing Creatives (CTR vs ROAS)',
+                    color_discrete_map={
+                        '🏆 TOP WINNER': '#10b981',
+                        '🟢 WINNER': '#34d399'
+                    }
+                )
+                fig_winners.update_layout(height=400)
+                st.plotly_chart(fig_winners, use_container_width=True)
+            
+            with col2:
+                # Performance Distribution
+                performance_counts = filtered_creatives['Performance'].value_counts()
+                
+                fig_dist = px.pie(
+                    values=performance_counts.values,
+                    names=performance_counts.index,
+                    title='Creative Performance Distribution',
+                    color=performance_counts.index,
+                    color_discrete_map={
+                        '🏆 TOP WINNER': '#10b981',
+                        '🟢 WINNER': '#34d399',
+                        '🟡 AVERAGE': '#fbbf24',
+                        '🔴 LOSER': '#ef4444'
+                    }
+                )
+                fig_dist.update_layout(height=400)
+                st.plotly_chart(fig_dist, use_container_width=True)
+            
+            # Winner & Loser Cards
+            st.markdown("### 🎯 Actionable Creative Insights")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("#### 🏆 Top Winners - SCALE THESE!")
+                top_5_winners = filtered_creatives[filtered_creatives['Performance'].str.contains('WINNER')].head(5)
+                
+                for _, row in top_5_winners.iterrows():
+                    st.markdown(f"""
+                    <div class="winner-card">
+                        <h4>{row['Ad Name']}</h4>
+                        <p><strong>ROAS:</strong> {row['ROAS']:.2f}x | <strong>CTR:</strong> {row['CTR']:.2f}% | <strong>Spend:</strong> EGP {row['Spend']:,.2f}</p>
+                        <p><strong>Purchases:</strong> {int(row['Purchases'])} | <strong>Revenue:</strong> EGP {row['Revenue']:,.2f}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+            
+            with col2:
+                st.markdown("#### 🔴 Losers - PAUSE THESE!")
+                losers = filtered_creatives[filtered_creatives['Performance'].str.contains('LOSER')].head(5)
+                
+                for _, row in losers.iterrows():
+                    st.markdown(f"""
+                    <div class="loser-card">
+                        <h4>{row['Ad Name']}</h4>
+                        <p><strong>ROAS:</strong> {row['ROAS']:.2f}x | <strong>CTR:</strong> {row['CTR']:.2f}% | <strong>Wasted:</strong> EGP {row['Spend']:,.2f}</p>
+                        <p><strong>Purchases:</strong> {int(row['Purchases'])} | <strong>Revenue:</strong> EGP {row['Revenue']:,.2f}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+    
+    # TAB 3: Placement Breakdown
+    with tab3:
+        st.markdown("## 📍 Placement Performance Analysis")
+        
+        if not placement_df.empty:
+            # Placement Table
+            st.markdown("### Placement Performance Table")
+            
+            styled_placement_df = placement_df.style.format({
+                'Spend': 'EGP {:,.2f}',
+                'Revenue': 'EGP {:,.2f}',
+                'ROAS': '{:.2f}x',
+                'CPM': 'EGP {:.2f}',
+                'CTR': '{:.2f}%',
+                'Impressions': '{:,}',
+                'Clicks': '{:,}'
+            })
+            
+            st.dataframe(styled_placement_df, use_container_width=True, height=400)
+            
+            # Charts
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # ROAS by Placement
+                fig_placement_roas = px.bar(
+                    placement_df.sort_values('ROAS', ascending=False),
+                    x='Placement',
+                    y='ROAS',
+                    color='ROAS',
+                    color_continuous_scale=['#ef4444', '#fbbf24', '#10b981'],
+                    title='ROAS by Placement'
+                )
+                fig_placement_roas.add_hline(y=roas_threshold, line_dash="dash", line_color="red")
+                fig_placement_roas.update_layout(height=400, xaxis_tickangle=-45)
+                st.plotly_chart(fig_placement_roas, use_container_width=True)
+            
+            with col2:
+                # Spend Distribution
+                fig_placement_spend = px.pie(
+                    placement_df,
+                    values='Spend',
+                    names='Placement',
+                    title='Spend Distribution by Placement'
+                )
+                fig_placement_spend.update_layout(height=400)
+                st.plotly_chart(fig_placement_spend, use_container_width=True)
+            
+            # Best Placements
+            st.markdown("### 🎯 Best Performing Placements")
+            
+            best_placements = placement_df[placement_df['Flag'] == '🟢'].sort_values('ROAS', ascending=False)
+            
+            if not best_placements.empty:
+                for _, row in best_placements.head(3).iterrows():
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("Placement", row['Placement'])
+                    with col2:
+                        st.metric("ROAS", f"{row['ROAS']:.2f}x")
+                    with col3:
+                        st.metric("CTR", f"{row['CTR']:.2f}%")
+                    with col4:
+                        st.metric("Purchases", f"{int(row['Purchases'])}")
+                    st.markdown("---")
+    
+    # TAB 4: Demographics
+    with tab4:
+        st.markdown("## 👥 Demographic Performance Analysis")
+        
+        if not demographic_df.empty:
+            # Demographic Table
+            st.markdown("### Demographic Performance Table")
+            
+            styled_demo_df = demographic_df.style.format({
+                'Spend': 'EGP {:,.2f}',
+                'Revenue': 'EGP {:,.2f}',
+                'ROAS': '{:.2f}x',
+                'CTR': '{:.2f}%',
+                'Impressions': '{:,}',
+                'Clicks': '{:,}'
+            })
+            
+            st.dataframe(styled_demo_df, use_container_width=True, height=400)
+            
+            # Charts
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # ROAS by Demographic
+                fig_demo_roas = px.bar(
+                    demographic_df.sort_values('ROAS', ascending=False).head(15),
+                    x='Demographic',
+                    y='ROAS',
+                    color='ROAS',
+                    color_continuous_scale=['#ef4444', '#fbbf24', '#10b981'],
+                    title='ROAS by Age & Gender'
+                )
+                fig_demo_roas.add_hline(y=roas_threshold, line_dash="dash", line_color="red")
+                fig_demo_roas.update_layout(height=400, xaxis_tickangle=-45)
+                st.plotly_chart(fig_demo_roas, use_container_width=True)
+            
+            with col2:
+                # Purchases by Demographic
+                fig_demo_purchases = px.bar(
+                    demographic_df.sort_values('Purchases', ascending=False).head(15),
+                    x='Demographic',
+                    y='Purchases',
+                    color='Purchases',
+                    color_continuous_scale='Greens',
+                    title='Purchases by Age & Gender'
+                )
+                fig_demo_purchases.update_layout(height=400, xaxis_tickangle=-45)
+                st.plotly_chart(fig_demo_purchases, use_container_width=True)
+            
+            # Best Demographics
+            st.markdown("### 🎯 Target These Demographics")
+            
+            best_demos = demographic_df[demographic_df['Flag'] == '🟢'].sort_values('ROAS', ascending=False).head(5)
+            
+            for _, row in best_demos.iterrows():
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Demographic", row['Demographic'])
+                with col2:
+                    st.metric("ROAS", f"{row['ROAS']:.2f}x")
+                with col3:
+                    st.metric("Purchases", f"{int(row['Purchases'])}")
+                with col4:
+                    st.metric("Spend", f"EGP {row['Spend']:,.2f}")
+                st.markdown("---")
+    
+    # TAB 5: Geographic
+    with tab5:
+        st.markdown("## 🌍 Geographic Performance Analysis")
+        
+        if not geographic_df.empty:
+            # Geographic Table
+            st.markdown("### Geographic Performance Table")
+            
+            styled_geo_df = geographic_df.style.format({
+                'Spend': 'EGP {:,.2f}',
+                'Revenue': 'EGP {:,.2f}',
+                'ROAS': '{:.2f}x',
+                'Impressions': '{:,}'
+            })
+            
+            st.dataframe(styled_geo_df, use_container_width=True, height=400)
+            
+            # Charts
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # ROAS by Location
+                fig_geo_roas = px.bar(
+                    geographic_df.sort_values('ROAS', ascending=False).head(15),
+                    x='Location',
+                    y='ROAS',
+                    color='ROAS',
+                    color_continuous_scale=['#ef4444', '#fbbf24', '#10b981'],
+                    title='ROAS by Location'
+                )
+                fig_geo_roas.add_hline(y=roas_threshold, line_dash="dash", line_color="red")
+                fig_geo_roas.update_layout(height=400, xaxis_tickangle=-45)
+                st.plotly_chart(fig_geo_roas, use_container_width=True)
+            
+            with col2:
+                # Purchases by Location
+                fig_geo_purchases = px.bar(
+                    geographic_df.sort_values('Purchases', ascending=False).head(15),
+                    x='Location',
+                    y='Purchases',
+                    color='Purchases',
+                    color_continuous_scale='Blues',
+                    title='Purchases by Location'
+                )
+                fig_geo_purchases.update_layout(height=400, xaxis_tickangle=-45)
+                st.plotly_chart(fig_geo_purchases, use_container_width=True)
+            
+            # Best Locations
+            st.markdown("### 🎯 Expand in These Locations")
+            
+            best_locations = geographic_df[geographic_df['Flag'] == '🟢'].sort_values('ROAS', ascending=False).head(5)
+            
+            for _, row in best_locations.iterrows():
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Location", row['Location'])
+                with col2:
+                    st.metric("ROAS", f"{row['ROAS']:.2f}x")
+                with col3:
+                    st.metric("Purchases", f"{int(row['Purchases'])}")
+                with col4:
+                    st.metric("Revenue", f"EGP {row['Revenue']:,.2f}")
+                st.markdown("---")
+    
+    # TAB 6: Insights & Actions
+    with tab6:
+        st.markdown("## 💡 Insights & Recommended Actions")
+        
+        # Campaign Insights
+        st.markdown("### 🎯 Campaign Recommendations")
+        
+        if not campaign_df.empty:
+            winners = campaign_df[campaign_df['ROAS'] >= roas_threshold]
+            losers = campaign_df[campaign_df['ROAS'] < roas_threshold]
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.success("#### ✅ SCALE THESE CAMPAIGNS")
+                for _, row in winners.head(5).iterrows():
+                    st.markdown(f"""
+                    **{row['Campaign Name']}**
+                    - ROAS: {row['ROAS']:.2f}x
+                    - Current Spend: EGP {row['Spend']:,.2f}
+                    - 💡 **Action**: Increase budget by 20-30%
+                    """)
+                    st.markdown("---")
+            
+            with col2:
+                st.error("#### ❌ PAUSE/OPTIMIZE THESE CAMPAIGNS")
+                for _, row in losers.head(5).iterrows():
+                    st.markdown(f"""
+                    **{row['Campaign Name']}**
+                    - ROAS: {row['ROAS']:.2f}x
+                    - Wasted: EGP {row['Spend']:,.2f}
+                    - 💡 **Action**: Pause or reduce budget by 50%
+                    """)
+                    st.markdown("---")
+        
+        # Creative Insights
+        st.markdown("### 🎨 Creative Recommendations")
+        
+        if not creative_df.empty:
+            top_creatives = creative_df[creative_df['Performance'].str.contains('TOP WINNER')].head(5)
+            bad_creatives = creative_df[creative_df['Performance'].str.contains('LOSER')].head(5)
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.success("#### 🏆 SCALE THESE CREATIVES")
+                for _, row in top_creatives.iterrows():
+                    st.markdown(f"""
+                    **{row['Ad Name']}**
+                    - ROAS: {row['ROAS']:.2f}x | CTR: {row['CTR']:.2f}%
+                    - 💡 **Action**: Create variations & test
+                    """)
+                    st.markdown("---")
+            
+            with col2:
+                st.error("#### 🔴 REPLACE THESE CREATIVES")
+                for _, row in bad_creatives.iterrows():
+                    st.markdown(f"""
+                    **{row['Ad Name']}**
+                    - ROAS: {row['ROAS']:.2f}x | Wasted: EGP {row['Spend']:,.2f}
+                    - 💡 **Action**: Pause immediately
+                    """)
+                    st.markdown("---")
+        
+        # Summary Actions
+        st.markdown("### 📋 Priority Action Items")
+        
+        action_items = []
+        
+        if not campaign_df.empty:
+            losers = campaign_df[campaign_df['ROAS'] < roas_threshold]
+            potential_savings = losers['Spend'].sum()
+            
+            if potential_savings > 0:
+                action_items.append({
+                    'Priority': '🔴 HIGH',
+                    'Action': f'Pause {len(losers)} underperforming campaigns',
+                    'Impact': f'Save EGP {potential_savings:,.2f}'
+                })
+        
+        if not creative_df.empty:
+            bad_creatives = creative_df[creative_df['Performance'].str.contains('LOSER')]
+            wasted_creative_spend = bad_creatives['Spend'].sum()
+            
+            if wasted_creative_spend > 0:
+                action_items.append({
+                    'Priority': '🔴 HIGH',
+                    'Action': f'Pause {len(bad_creatives)} losing creatives',
+                    'Impact': f'Save EGP {wasted_creative_spend:,.2f}'
+                })
+        
+        if not campaign_df.empty:
+            winners = campaign_df[campaign_df['ROAS'] >= roas_threshold]
+            
+            if not winners.empty:
+                action_items.append({
+                    'Priority': '🟢 MEDIUM',
+                    'Action': f'Increase budget on {len(winners)} winning campaigns',
+                    'Impact': f'Potential to scale EGP {winners["Revenue"].sum():,.2f}'
+                })
+        
+        if action_items:
+            st.table(pd.DataFrame(action_items))
+        
+        # Export Button
+        st.markdown("### 📥 Export Data")
+        
+        if st.button("📊 Download Full Report (Excel)", use_container_width=True):
+            # Create Excel file
+            from io import BytesIO
+            
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                if not campaign_df.empty:
+                    campaign_df.to_excel(writer, sheet_name='Campaigns', index=False)
+                if not creative_df.empty:
+                    creative_df.to_excel(writer, sheet_name='Creatives', index=False)
+                if not placement_df.empty:
+                    placement_df.to_excel(writer, sheet_name='Placements', index=False)
+                if not demographic_df.empty:
+                    demographic_df.to_excel(writer, sheet_name='Demographics', index=False)
+                if not geographic_df.empty:
+                    geographic_df.to_excel(writer, sheet_name='Geographic', index=False)
+            
+            st.download_button(
+                label="⬇️ Download Excel Report",
+                data=output.getvalue(),
+                file_name=f"Meta_Ads_Report_{start_date_str}_to_{end_date_str}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
+if __name__ == "__main__":
+    main()
